@@ -4,18 +4,15 @@ const cors = require("cors");
 
 const app = express();
 
-// Включаем CORS и JSON парсер
 app.use(cors());
 app.use(express.json());
 
-/**
- * Функция проверки TCP-соединения (Пинг)
- */
+// Функция проверки TCP-соединения
 function pingHost(proxy) {
     return new Promise((resolve) => {
-        // Проверяем наличие обязательных полей
-        if (!proxy.host || !proxy.port) {
-            return resolve({ ...proxy, ping: -1, alive: false });
+        // Проверка на случай, если прилетел пустой объект
+        if (!proxy || !proxy.host || !proxy.port) {
+            return resolve({ ...proxy, ping: -1, alive: false, error: "Invalid data" });
         }
 
         const host = proxy.host;
@@ -23,8 +20,7 @@ function pingHost(proxy) {
         const start = Date.now();
         const socket = new net.Socket();
 
-        // Увеличиваем таймаут до 3000мс (3 сек), так как бесплатные прокси медленные
-        socket.setTimeout(3000);
+        socket.setTimeout(2000); // 2 секунды на попытку
 
         socket.connect(port, host, () => {
             const ping = Date.now() - start;
@@ -36,49 +32,43 @@ function pingHost(proxy) {
             });
         });
 
-        const handleError = () => {
+        socket.on("error", () => {
             socket.destroy();
             resolve({ ...proxy, ping: -1, alive: false });
-        };
+        });
 
-        socket.on("error", handleError);
-        socket.on("timeout", handleError);
+        socket.on("timeout", () => {
+            socket.destroy();
+            resolve({ ...proxy, ping: -1, alive: false });
+        });
     });
 }
 
-/**
- * API эндпоинт для проверки списка прокси
- */
 app.post("/ping", async (req, res) => {
     try {
-        const rawProxies = req.body.proxies || [];
+        const proxies = req.body.proxies || [];
         
-        // Валидация: убираем объекты без хоста или порта
-        const validProxies = rawProxies.filter(p => p.host && p.port);
+        // Чтобы сервер не упал от слишком большого количества запросов за раз,
+        // ограничиваем пачку (например, максимум 50 штук)
+        const limitedProxies = proxies.slice(0, 60);
 
-        // Запускаем проверку всех прокси параллельно
         const results = await Promise.all(
-            validProxies.map(p => pingHost(p))
+            limitedProxies.map(p => pingHost(p))
         );
-
-        // Сортировка: Живые вверху (по пингу), мертвые внизу
-        results.sort((a, b) => {
-            if (a.alive !== b.alive) return b.alive - a.alive;
-            return a.ping - b.ping;
-        });
 
         res.json(results);
     } catch (err) {
-        console.error("Ошибка API:", err);
-        res.status(500).json({ error: "Внутренняя ошибка сервера" });
+        console.error("Критическая ошибка:", err);
+        res.status(500).json({ error: "Internal Server Error", details: err.message });
     }
 });
 
+// Для проверки, что сервер вообще жив
 app.get("/", (req, res) => {
-    res.send("<h1>MTProto Monitor API</h1><p>Status: Running 🚀</p>");
+    res.send("MTProto Ping API is running");
 });
 
-const PORT = process.env.PORT || 10000;
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`Сервер запущен на порту ${PORT}`);
+    console.log(`Server started on port ${PORT}`);
 });
