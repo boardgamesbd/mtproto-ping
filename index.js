@@ -1,49 +1,83 @@
 const express = require("express");
 const net = require("net");
+const cors = require("cors"); // Добавлено: решение проблемы "Ошибка связи"
 
 const app = express();
+
+// Разрешаем запросы с любого домена (CORS)
+app.use(cors());
 app.use(express.json());
 
-function pingHost(host, port) {
+/**
+ * Функция проверки TCP-соединения (Пинг)
+ */
+function pingHost(proxy) {
     return new Promise((resolve) => {
+        const host = proxy.host;
+        const port = parseInt(proxy.port);
         const start = Date.now();
         const socket = new net.Socket();
 
-        socket.setTimeout(1500);
+        // Таймаут 2 секунды для проверки
+        socket.setTimeout(2000);
 
         socket.connect(port, host, () => {
             const ping = Date.now() - start;
             socket.destroy();
-            resolve({ host, port, ping, alive: true });
+            resolve({ 
+                ...proxy, // Возвращаем все исходные данные прокси
+                ping: ping, 
+                alive: true 
+            });
         });
 
-        socket.on("error", () => resolve({ host, port, ping: -1, alive: false }));
+        // Обработка ошибки (сервер недоступен)
+        socket.on("error", () => {
+            socket.destroy();
+            resolve({ ...proxy, ping: -1, alive: false });
+        });
 
+        // Обработка таймаута (сервер слишком долго отвечает)
         socket.on("timeout", () => {
             socket.destroy();
-            resolve({ host, port, ping: -1, alive: false });
+            resolve({ ...proxy, ping: -1, alive: false });
         });
     });
 }
 
+/**
+ * API эндпоинт для массовой проверки
+ */
 app.post("/ping", async (req, res) => {
-    const proxies = req.body.proxies || [];
+    try {
+        const proxies = req.body.proxies || [];
 
-    const results = await Promise.all(
-        proxies.map(p => pingHost(p.host, p.port))
-    );
+        // Проверяем все прокси параллельно
+        const results = await Promise.all(
+            proxies.map(p => pingHost(p))
+        );
 
-    results.sort((a, b) => {
-        if (!a.alive) return 1;
-        if (!b.alive) return -1;
-        return a.ping - b.ping;
-    });
+        // Сортировка: сначала живые с лучшим пингом, потом мертвые
+        results.sort((a, b) => {
+            if (a.alive !== b.alive) return b.alive - a.alive;
+            return a.ping - b.ping;
+        });
 
-    res.json(results);
+        res.json(results);
+    } catch (err) {
+        res.status(500).json({ error: "Ошибка сервера при проверке" });
+    }
 });
 
+/**
+ * Простая проверка работоспособности в браузере
+ */
 app.get("/", (req, res) => {
-    res.send("MTProto ping API работает 🚀");
+    res.send("MTProto Gold API: Online 🚀");
 });
 
-app.listen(3000, () => console.log("Server started"));
+// Настройка порта для Render
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+    console.log(`Сервер запущен на порту ${PORT}`);
+});
