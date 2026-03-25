@@ -10,26 +10,27 @@ app.use(express.json());
 // Функция проверки TCP-соединения
 function pingHost(proxy) {
     return new Promise((resolve) => {
-        // Проверка на случай, если прилетел пустой объект
         if (!proxy || !proxy.host || !proxy.port) {
-            return resolve({ ...proxy, ping: -1, alive: false, error: "Invalid data" });
+            return resolve({ ...proxy, ping: -1, alive: false });
         }
 
         const host = proxy.host;
         const port = parseInt(proxy.port);
+
+        // КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: проверка диапазона порта
+        if (isNaN(port) || port <= 0 || port > 65535) {
+            console.warn(`Пропущен невалидный порт: ${port} для хоста ${host}`);
+            return resolve({ ...proxy, ping: -1, alive: false, error: "Invalid port" });
+        }
+
         const start = Date.now();
         const socket = new net.Socket();
-
-        socket.setTimeout(2000); // 2 секунды на попытку
+        socket.setTimeout(2000);
 
         socket.connect(port, host, () => {
             const ping = Date.now() - start;
             socket.destroy();
-            resolve({ 
-                ...proxy, 
-                ping: ping, 
-                alive: true 
-            });
+            resolve({ ...proxy, ping: ping, alive: true });
         });
 
         socket.on("error", () => {
