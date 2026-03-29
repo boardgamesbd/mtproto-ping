@@ -22,20 +22,22 @@ let lastUpdate = 0;
 let postsToday = 0;
 let lastPostDay = new Date().getDate();
 
-// ТЩАТЕЛЬНАЯ ПРОВЕРКА (Deep Check)
-// Мы не просто стучимся в порт, а ждем данных от прокси
+/**
+ * Глубокая проверка сокета:
+ * Не просто стучимся в порт, а имитируем начало передачи данных.
+ */
 function checkSocketDeep(host, port) {
     return new Promise((resolve) => {
         const socket = new net.Socket();
         const start = Date.now();
-        // Увеличиваем таймаут до 5 секунд для стабильности
-        socket.setTimeout(5000);
+        socket.setTimeout(5000); 
 
         socket.connect(port, host, () => {
             const ping = Date.now() - start;
             
-            // Здесь можно было бы отправить приветственный пакет MTProto, 
-            // но для начала просто убедимся, что сокет не закрывается сразу
+            // Пытаемся отправить пустой байт, чтобы проверить реакцию сервера
+            socket.write(Buffer.from([0x00])); 
+            
             setTimeout(() => {
                 if (!socket.destroyed) {
                     socket.destroy();
@@ -43,7 +45,7 @@ function checkSocketDeep(host, port) {
                 } else {
                     resolve({ alive: false, ping: -1 });
                 }
-            }, 500); // Ждем полсекунды, чтобы проверить стабильность
+            }, 1000); // Ждем секунду на проверку стабильности
         });
 
         const fail = () => { socket.destroy(); resolve({ alive: false, ping: -1 }); };
@@ -52,17 +54,15 @@ function checkSocketDeep(host, port) {
     });
 }
 
-// Отправка в Telegram
 async function sendToTelegram(proxy) {
     const url = `https://api.telegram.org/bot${TG_TOKEN}/sendMessage`;
     const proxyLink = `https://t.me/proxy?server=${proxy.host}&port=${proxy.port}&secret=${proxy.secret}`;
     
-    // Добавляем инфу о типе прокси, чтобы юзер понимал
-    const text = `🚀 **Verified MTProto Proxy**\n\n` +
-                 `⚡ Ping: \`${proxy.ping}ms\`\n` +
-                 `📍 Server: \`${proxy.host}\`\n` +
-                 `🏷 Status: \`High Stability\`\n\n` +
-                 `🔗 [ПОДКЛЮЧИТЬ](${proxyLink})`;
+    const text = `🚀 **Verified MTProto Proxy (Padding)**\n\n` +
+                 `⚡ Пинг: \`${proxy.ping}ms\`\n` +
+                 `📍 Сервер: \`${proxy.host}\`\n` +
+                 `🛡 Секрет: \`dd-encoded\`\n\n` +
+                 `🔗 [ПОДКЛЮЧИТЬ ПРЯМО СЕЙЧАС](${proxyLink})`;
 
     try {
         await axios.post(url, {
@@ -72,8 +72,9 @@ async function sendToTelegram(proxy) {
             disable_web_page_preview: true
         });
         postsToday++;
+        console.log(`Пост отправлен (${postsToday}/${DAILY_LIMIT}): ${proxy.host}`);
     } catch (err) {
-        console.error("Ошибка TG:", err.message);
+        console.error("Ошибка TG:", err.response?.data?.description || err.message);
     }
 }
 
@@ -91,9 +92,9 @@ async function updateCache() {
         let allLines = [];
         for (const url of SOURCES) {
             try {
-                const res = await axios.get(url, { timeout: 5000 });
+                const res = await axios.get(url, { timeout: 7000 });
                 allLines.push(...res.data.split('\n'));
-            } catch (e) { console.error(`Ошибка загрузки ${url}`); }
+            } catch (e) { console.error(`Ошибка загрузки источника: ${url}`); }
         }
 
         const toCheck = [];
@@ -102,20 +103,28 @@ async function updateCache() {
         allLines.forEach(line => {
             const trimmed = line.trim();
             if (!trimmed.includes('server=') || !trimmed.includes('port=')) return;
+            
             const params = new URLSearchParams(trimmed.includes('?') ? trimmed.split('?')[1] : trimmed);
             const host = params.get('server');
             const port = parseInt(params.get('port'));
-            if (host && port > 0 && !uniqueHosts.has(host)) {
+            const secret = params.get('secret') || '';
+
+            // ФИЛЬТР: Пропускаем только современные секреты (начинаются на dd)
+            const isModern = secret.toLowerCase().startsWith('dd');
+
+            if (host && port > 0 && isModern && !uniqueHosts.has(host)) {
                 uniqueHosts.add(host);
-                toCheck.push({ host, port, secret: params.get('secret') || '' });
+                toCheck.push({ host, port, secret });
             }
         });
 
-        // Сортируем: сначала проверяем те, что уже были живыми (они стабильнее)
+        console.log(`Уникальных DD-прокси для проверки: ${toCheck.length}`);
+
+        // Берем пачку из 50 штук
         const batch = toCheck.slice(0, 50);
-        
-        // Проверяем по очереди или небольшими пачками по 5, чтобы не убить CPU
         const results = [];
+        
+        // Проверяем по 5 штук одновременно, чтобы не вешать сетевой стек
         for (let i = 0; i < batch.length; i += 5) {
             const chunk = batch.slice(i, i + 5);
             const chunkResults = await Promise.all(chunk.map(p => checkSocketDeep(p.host, p.port)));
@@ -124,35 +133,43 @@ async function updateCache() {
 
         cachedProxies = results.sort((a, b) => (b.alive - a.alive) || (a.ping - b.ping));
 
+        // ПОСТИНГ
         if (postsToday < DAILY_LIMIT) {
-            const aliveNow = cachedProxies.filter(p => p.alive && p.ping < 1500); // Берем только быстрые
+            const aliveNow = cachedProxies.filter(p => p.alive && p.ping < 2000);
             const toPublish = aliveNow.slice(0, 5);
             
-            for (const proxy of toPublish) {
-                if (postsToday >= DAILY_LIMIT) break;
-                await sendToTelegram(proxy);
-                if (toPublish.indexOf(proxy) !== toPublish.length - 1) {
-                    await new Promise(r => setTimeout(r, 60000));
+            if (toPublish.length > 0) {
+                console.log(`Начинаем публикацию пачки из ${toPublish.length} шт.`);
+                for (const proxy of toPublish) {
+                    if (postsToday >= DAILY_LIMIT) break;
+                    await sendToTelegram(proxy);
+                    
+                    // Делей 1 минута между постами в пачке
+                    if (toPublish.indexOf(proxy) !== toPublish.length - 1) {
+                        await new Promise(r => setTimeout(r, 60000));
+                    }
                 }
             }
         }
 
         lastUpdate = Date.now();
     } catch (err) {
-        console.error("Ошибка обновления:", err.message);
+        console.error("Критическая ошибка обновления:", err.message);
     } finally {
         isUpdating = false;
     }
 }
 
+// Старт при запуске
 updateCache();
 
 app.get("/ping", async (req, res) => {
-    if (Date.now() - lastUpdate > 30 * 60 * 1000) updateCache();
+    // Если прошло > 20 минут, обновляем
+    if (Date.now() - lastUpdate > 20 * 60 * 1000) updateCache();
     res.json(cachedProxies);
 });
 
-app.get("/", (req, res) => res.send("MTProto Deep Checker Online"));
+app.get("/", (req, res) => res.send("MTProto DD-Only Checker Active"));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
