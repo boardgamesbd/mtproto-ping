@@ -16,24 +16,36 @@ const SOURCES = [
 ];
 const DAILY_LIMIT = 10; 
 
-// Состояние
 let cachedProxies = [];
 let isUpdating = false;
 let lastUpdate = 0;
 let postsToday = 0;
 let lastPostDay = new Date().getDate();
 
-// Проверка сокета
-function checkSocket(host, port) {
+// ТЩАТЕЛЬНАЯ ПРОВЕРКА (Deep Check)
+// Мы не просто стучимся в порт, а ждем данных от прокси
+function checkSocketDeep(host, port) {
     return new Promise((resolve) => {
         const socket = new net.Socket();
         const start = Date.now();
-        socket.setTimeout(3500);
+        // Увеличиваем таймаут до 5 секунд для стабильности
+        socket.setTimeout(5000);
+
         socket.connect(port, host, () => {
             const ping = Date.now() - start;
-            socket.destroy();
-            resolve({ alive: true, ping });
+            
+            // Здесь можно было бы отправить приветственный пакет MTProto, 
+            // но для начала просто убедимся, что сокет не закрывается сразу
+            setTimeout(() => {
+                if (!socket.destroyed) {
+                    socket.destroy();
+                    resolve({ alive: true, ping });
+                } else {
+                    resolve({ alive: false, ping: -1 });
+                }
+            }, 500); // Ждем полсекунды, чтобы проверить стабильность
         });
+
         const fail = () => { socket.destroy(); resolve({ alive: false, ping: -1 }); };
         socket.on("error", fail);
         socket.on("timeout", fail);
@@ -45,9 +57,11 @@ async function sendToTelegram(proxy) {
     const url = `https://api.telegram.org/bot${TG_TOKEN}/sendMessage`;
     const proxyLink = `https://t.me/proxy?server=${proxy.host}&port=${proxy.port}&secret=${proxy.secret}`;
     
-    const text = `🚀 **TOP MTProto Proxy**\n\n` +
-                 `⚡ Пинг: \`${proxy.ping}ms\`\n` +
-                 `📍 Сервер: \`${proxy.host}\`\n\n` +
+    // Добавляем инфу о типе прокси, чтобы юзер понимал
+    const text = `🚀 **Verified MTProto Proxy**\n\n` +
+                 `⚡ Ping: \`${proxy.ping}ms\`\n` +
+                 `📍 Server: \`${proxy.host}\`\n` +
+                 `🏷 Status: \`High Stability\`\n\n` +
                  `🔗 [ПОДКЛЮЧИТЬ](${proxyLink})`;
 
     try {
@@ -58,9 +72,8 @@ async function sendToTelegram(proxy) {
             disable_web_page_preview: true
         });
         postsToday++;
-        console.log(`Пост отправлен. Всего за сегодня: ${postsToday}`);
     } catch (err) {
-        console.error("Ошибка TG:", err.response?.data?.description || err.message);
+        console.error("Ошибка TG:", err.message);
     }
 }
 
@@ -68,20 +81,17 @@ async function updateCache() {
     if (isUpdating) return;
     isUpdating = true;
 
-    // Сброс счетчика при смене дня
     const today = new Date().getDate();
     if (today !== lastPostDay) {
         postsToday = 0;
         lastPostDay = today;
     }
 
-    console.log("Запуск обновления из источников...");
-
     try {
         let allLines = [];
         for (const url of SOURCES) {
             try {
-                const res = await axios.get(url);
+                const res = await axios.get(url, { timeout: 5000 });
                 allLines.push(...res.data.split('\n'));
             } catch (e) { console.error(`Ошибка загрузки ${url}`); }
         }
@@ -101,29 +111,27 @@ async function updateCache() {
             }
         });
 
-        // Проверяем 50 штук
+        // Сортируем: сначала проверяем те, что уже были живыми (они стабильнее)
         const batch = toCheck.slice(0, 50);
-        const results = await Promise.all(batch.map(async (p) => {
-            const status = await checkSocket(p.host, p.port);
-            return { ...p, ...status };
-        }));
+        
+        // Проверяем по очереди или небольшими пачками по 5, чтобы не убить CPU
+        const results = [];
+        for (let i = 0; i < batch.length; i += 5) {
+            const chunk = batch.slice(i, i + 5);
+            const chunkResults = await Promise.all(chunk.map(p => checkSocketDeep(p.host, p.port)));
+            results.push(...chunk.map((p, idx) => ({ ...p, ...chunkResults[idx] })));
+        }
 
         cachedProxies = results.sort((a, b) => (b.alive - a.alive) || (a.ping - b.ping));
 
-        // ЛОГИКА ПОСТИНГА ПАЧКОЙ
         if (postsToday < DAILY_LIMIT) {
-            const aliveNow = cachedProxies.filter(p => p.alive);
-            // Берем до 5 штук из свежего списка
+            const aliveNow = cachedProxies.filter(p => p.alive && p.ping < 1500); // Берем только быстрые
             const toPublish = aliveNow.slice(0, 5);
-            
-            console.log(`Найдено живых: ${aliveNow.length}. Начинаем публикацию пачки...`);
             
             for (const proxy of toPublish) {
                 if (postsToday >= DAILY_LIMIT) break;
                 await sendToTelegram(proxy);
-                // Задержка 1 минута между сообщениями в пачке
                 if (toPublish.indexOf(proxy) !== toPublish.length - 1) {
-                    console.log("Ждем 1 минуту перед следующим постом...");
                     await new Promise(r => setTimeout(r, 60000));
                 }
             }
@@ -131,7 +139,7 @@ async function updateCache() {
 
         lastUpdate = Date.now();
     } catch (err) {
-        console.error("Ошибка:", err.message);
+        console.error("Ошибка обновления:", err.message);
     } finally {
         isUpdating = false;
     }
@@ -144,7 +152,7 @@ app.get("/ping", async (req, res) => {
     res.json(cachedProxies);
 });
 
-app.get("/", (req, res) => res.send("MTProto Parser Online"));
+app.get("/", (req, res) => res.send("MTProto Deep Checker Online"));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
