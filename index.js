@@ -1,16 +1,24 @@
 const express = require("express");
 const net = require("net");
 const cors = require("cors");
-const axios = require("axios"); // Убедись, что axios есть в package.json
+const axios = require("axios");
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
+// --- НАСТРОЙКИ ---
+const TG_TOKEN = "8254087272:AAFKgYTDBZCvkyuZ34fbZqc6Y43qjzEqkSE";
+const TG_CHAT_ID = "@Proxy_free_Daily";
 const RAW_DATA_URL = "https://raw.githubusercontent.com/SoliSpirit/mtproto/master/all_proxies.txt";
+const DAILY_LIMIT = 10; 
+
+// Состояние
 let cachedProxies = [];
 let isUpdating = false;
 let lastUpdate = 0;
+let postsToday = 0;
+let lastPostDay = new Date().getDate();
 
 // Функция проверки одного хоста
 function checkSocket(host, port) {
@@ -31,11 +39,42 @@ function checkSocket(host, port) {
     });
 }
 
-// Фоновое обновление всех прокси
+// Отправка в Telegram
+async function sendToTelegram(proxy) {
+    const today = new Date().getDate();
+    if (today !== lastPostDay) {
+        postsToday = 0;
+        lastPostDay = today;
+    }
+
+    if (postsToday >= DAILY_LIMIT) return;
+
+    const url = `https://api.telegram.org/bot${TG_TOKEN}/sendMessage`;
+    const proxyLink = `https://t.me/proxy?server=${proxy.host}&port=${proxy.port}&secret=${proxy.secret}`;
+    
+    const text = `🚀 **TOP MTProto Proxy**\n\n` +
+                 `⚡ Пинг: \`${proxy.ping}ms\`\n` +
+                 `📍 Сервер: \`${proxy.host}\`\n\n` +
+                 `🔗 [ПОДКЛЮЧИТЬ ПРЯМО СЕЙЧАС](${proxyLink})`;
+
+    try {
+        await axios.post(url, {
+            chat_id: TG_CHAT_ID,
+            text: text,
+            parse_mode: "Markdown",
+            disable_web_page_preview: true
+        });
+        postsToday++;
+        console.log(`Опубликовано в ТГ: ${postsToday}/${DAILY_LIMIT}`);
+    } catch (err) {
+        console.error("Ошибка TG:", err.response?.data?.description || err.message);
+    }
+}
+
 async function updateCache() {
     if (isUpdating) return;
     isUpdating = true;
-    console.log("Запуск фонового обновления кэша...");
+    console.log("Запуск обновления и поиск лучшего прокси...");
 
     try {
         const response = await axios.get(RAW_DATA_URL);
@@ -48,51 +87,59 @@ async function updateCache() {
             const params = new URLSearchParams(trimmed.includes('?') ? trimmed.split('?')[1] : trimmed);
             const host = params.get('server');
             const port = parseInt(params.get('port'));
-            if (host && port > 0 && port <= 65535) {
+            if (host && port > 0) {
                 toCheck.push({ host, port, secret: params.get('secret') || '', full: trimmed });
             }
         });
 
-        // Проверяем пачками по 20, чтобы не вешать сервер
-        const results = [];
-        const limit = toCheck.slice(0, 150); // Проверяем максимум 150 штук
-        for (let i = 0; i < limit.length; i += 20) {
-            const chunk = limit.slice(i, i + 20);
-            const checked = await Promise.all(chunk.map(async p => {
-                const status = await checkSocket(p.host, p.port);
-                return { ...p, ...status };
-            }));
-            results.push(...checked);
-        }
+        // Берем первые 40 штук для проверки, чтобы не вешать Render
+        const batch = toCheck.slice(0, 40);
+        const results = await Promise.all(batch.map(async (p) => {
+            const status = await checkSocket(p.host, p.port);
+            return { ...p, ...status };
+        }));
 
         cachedProxies = results.sort((a, b) => {
             if (a.alive !== b.alive) return b.alive - a.alive;
             return (a.ping || 9999) - (b.ping || 9999);
         });
 
+        // ВЫБИРАЕМ ЛУЧШИЙ ДЛЯ ТЕЛЕГРАМА
+        const bestProxy = cachedProxies.find(p => p.alive);
+        if (bestProxy) {
+            await sendToTelegram(bestProxy);
+        }
+
         lastUpdate = Date.now();
-        console.log(`Кэш обновлен. Живых: ${cachedProxies.filter(p => p.alive).length}`);
     } catch (err) {
-        console.error("Ошибка обновления:", err.message);
+        console.error("Ошибка:", err.message);
     } finally {
         isUpdating = false;
     }
 }
 
-// Принудительно обновляем при старте
+// Авто-обновление при старте
 updateCache();
 
 app.get("/ping", async (req, res) => {
-    // Если кэш старше 5 минут — запускаем обновление в фоне
-    if (Date.now() - lastUpdate > 5 * 60 * 1000) {
+    // Если кэш пуст — ждем немного
+    if (cachedProxies.length === 0 && isUpdating) {
+        let attempts = 0;
+        while (isUpdating && attempts < 10) {
+            await new Promise(r => setTimeout(r, 500));
+            attempts++;
+        }
+    }
+    
+    // Обновляем, если прошло больше 10 минут
+    if (Date.now() - lastUpdate > 10 * 60 * 1000) {
         updateCache();
     }
     
-    // Отдаем то, что есть в памяти (мгновенно)
     res.json(cachedProxies);
 });
 
-app.get("/", (req, res) => res.send("MTProto Cache Server is Online"));
+app.get("/", (req, res) => res.send("MTProto Parser Online"));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server on port ${PORT}`));
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
