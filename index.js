@@ -21,6 +21,7 @@ let isUpdating = false;
 let lastUpdate = 0;
 let postsToday = 0;
 let lastPostDay = new Date().getDate();
+let isFirstRun = true;
 
 /**
  * Глубокая проверка сокета:
@@ -128,7 +129,15 @@ async function updateCache() {
         for (let i = 0; i < batch.length; i += 5) {
             const chunk = batch.slice(i, i + 5);
             const chunkResults = await Promise.all(chunk.map(p => checkSocketDeep(p.host, p.port)));
-            results.push(...chunk.map((p, idx) => ({ ...p, ...chunkResults[idx] })));
+            results.push(...chunk.map((p, idx) => {
+                const checkResult = chunkResults[idx];
+                return { 
+                    ...p, 
+                    ...checkResult,
+                    // Создаем поле full, которое ожидает фронтенд для кнопки "Войти"
+                    full: `tg://proxy?server=${p.host}&port=${p.port}&secret=${p.secret}` 
+                };
+            }));
         }
 
         cachedProxies = results.sort((a, b) => (b.alive - a.alive) || (a.ping - b.ping));
@@ -136,20 +145,22 @@ async function updateCache() {
         // ПОСТИНГ
         if (postsToday < DAILY_LIMIT) {
             const aliveNow = cachedProxies.filter(p => p.alive && p.ping < 2000);
-            const toPublish = aliveNow.slice(0, 5);
+            
+            // Если сервер только проснулся, берем только 1 прокси, а не 5
+            const countToPublish = isFirstRun ? 1 : 2; 
+            const toPublish = aliveNow.slice(0, countToPublish);
             
             if (toPublish.length > 0) {
-                console.log(`Начинаем публикацию пачки из ${toPublish.length} шт.`);
+                console.log(`Публикация: ${toPublish.length} шт. (FirstRun: ${isFirstRun})`);
                 for (const proxy of toPublish) {
                     if (postsToday >= DAILY_LIMIT) break;
                     await sendToTelegram(proxy);
                     
-                    // Делей 1 минута между постами в пачке
-                    if (toPublish.indexOf(proxy) !== toPublish.length - 1) {
-                        await new Promise(r => setTimeout(r, 60000));
-                    }
+                    // Ждем 2 минуты между постами, чтобы не спамить
+                    await new Promise(r => setTimeout(r, 120000)); 
                 }
             }
+            isFirstRun = false; // Сбрасываем флаг после первой проверки
         }
 
         lastUpdate = Date.now();
@@ -160,12 +171,14 @@ async function updateCache() {
     }
 }
 
-// Старт при запуске
-updateCache();
+// Старт при запуске - НЕ вызываем updateCache() сразу, ждем первый запрос
+// updateCache();
 
 app.get("/ping", async (req, res) => {
-    // Если прошло > 20 минут, обновляем
-    if (Date.now() - lastUpdate > 20 * 60 * 1000) updateCache();
+    // Обновляем только если данные старее 20 минут
+    if (Date.now() - lastUpdate > 20 * 60 * 1000) {
+        await updateCache(); 
+    }
     res.json(cachedProxies);
 });
 
