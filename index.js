@@ -12,9 +12,8 @@ const TG_TOKEN = "8254087272:AAFKgYTDBZCvkyuZ34fbZqc6Y43qjzEqkSE";
 const TG_CHAT_ID = "@Proxy_free_Daily";
 const SOURCES = [
     "https://raw.githubusercontent.com/SoliSpirit/mtproto/master/all_proxies.txt",
-	"https://raw.githubusercontent.com/kort0881/telegram-proxy-collector/refs/heads/main/verified/proxy_ru_verified.txt",
-	"https://raw.githubusercontent.com/kort0881/telegram-proxy-collector/refs/heads/main/verified/proxy_all_verified.txt"
-	
+    "https://raw.githubusercontent.com/kort0881/telegram-proxy-collector/refs/heads/main/verified/proxy_ru_verified.txt",
+    "https://raw.githubusercontent.com/kort0881/telegram-proxy-collector/refs/heads/main/verified/proxy_all_verified.txt"
 ];
 const DAILY_LIMIT = 10; 
 
@@ -97,9 +96,9 @@ async function updateCache() {
         }
 
         const uniqueHosts = new Set();
-        const toCheck = [];
+        let toCheck = [];
 
-        // --- НОВЫЙ ФИЛЬТР: 443/8443 и EE/DD ---
+        // --- ФИЛЬТР: только 443 и EE/DD ---
         allLines.forEach(line => {
             const trimmed = line.trim();
             if (!trimmed.includes('server=') || !trimmed.includes('port=')) return;
@@ -109,52 +108,49 @@ async function updateCache() {
             const port = parseInt(params.get('port'));
             const secret = (params.get('secret') || '').toLowerCase();
 
-            // Проверка портов: 443 или 8443
-            const isTargetPort = [443, 8443].includes(port);
+            // Проверка порта: только 443
+            const isTargetPort = port === 443;
             
             // Проверка секретов: начинаются на dd или ee
             const isTargetSecret = secret.startsWith('dd') || secret.startsWith('ee');
 
-            // Прокси проходит, если подходит порт ИЛИ подходит секрет
             if (host && port > 0 && (isTargetPort || isTargetSecret) && !uniqueHosts.has(host)) {
                 uniqueHosts.add(host);
                 toCheck.push({ host, port, secret });
             }
         });
 
-        console.log(`Уникальных прокси (443/8443 или DD/EE) для проверки: ${toCheck.length}`);
+        // Перемешиваем список, чтобы в выборку попадали разные серверы
+        toCheck = toCheck.sort(() => Math.random() - 0.5);
 
-        // Сброс лимита постов раз в сутки
+        console.log(`Уникальных прокси (443 или DD/EE) для проверки: ${toCheck.length}`);
+
         const today = new Date().getDate();
         if (today !== lastPostDay) {
             postsToday = 0;
             lastPostDay = today;
         }
 
-        // Проверка пинга
         const aliveNow = [];
-        for (const proxy of toCheck.slice(0, 100)) { // Проверяем первые 100 подходящих
+        // Проверяем первые 120 штук из перемешанного списка
+        for (const proxy of toCheck.slice(0, 120)) {
             const ping = await checkSocketDeep(proxy.host, proxy.port);
             if (ping !== null) {
                 aliveNow.push({ ...proxy, ping });
             }
         }
 
-        // Сортируем по пингу
         aliveNow.sort((a, b) => a.ping - b.ping);
         cachedProxies = aliveNow;
 
-        // Логика авто-публикации в ТГ
         if (postsToday < DAILY_LIMIT) {
             const countToPublish = isFirstRun ? 1 : 2; 
             const toPublish = aliveNow.slice(0, countToPublish);
             
             if (toPublish.length > 0) {
-                console.log(`Публикация: ${toPublish.length} шт. (FirstRun: ${isFirstRun})`);
                 for (const proxy of toPublish) {
                     if (postsToday >= DAILY_LIMIT) break;
                     await sendToTelegram(proxy);
-                    // Пауза 2 минуты между постами
                     await new Promise(r => setTimeout(r, 120000)); 
                 }
             }
@@ -171,8 +167,9 @@ async function updateCache() {
 
 // API Эндпоинты
 app.get("/ping", async (req, res) => {
-    if (Date.now() - lastUpdate > 20 * 60 * 1000) {
-        updateCache(); // Фоновое обновление
+    // Если кэш пуст или данные устарели — ждем обновление
+    if (cachedProxies.length === 0 || (Date.now() - lastUpdate > 20 * 60 * 1000)) {
+        await updateCache();
     }
     res.json(cachedProxies);
 });
