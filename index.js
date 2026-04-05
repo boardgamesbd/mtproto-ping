@@ -39,15 +39,8 @@ function checkSocketDeep(host, port) {
             resolve(ping);
         });
 
-        socket.on("error", () => {
-            socket.destroy();
-            resolve(null);
-        });
-
-        socket.on("timeout", () => {
-            socket.destroy();
-            resolve(null);
-        });
+        socket.on("error", () => { socket.destroy(); resolve(null); });
+        socket.on("timeout", () => { socket.destroy(); resolve(null); });
     });
 }
 
@@ -98,33 +91,38 @@ async function updateCache() {
         const uniqueHosts = new Set();
         let toCheck = [];
 
-        // --- ФИЛЬТР: только 443 и EE/DD ---
         allLines.forEach(line => {
             const trimmed = line.trim();
-            if (!trimmed.includes('server=') || !trimmed.includes('port=')) return;
+            if (!trimmed || !trimmed.includes('server=') || !trimmed.includes('port=')) return;
             
-            const params = new URLSearchParams(trimmed.includes('?') ? trimmed.split('?')[1] : trimmed);
-            const host = params.get('server');
-            const port = parseInt(params.get('port'));
-            const secret = (params.get('secret') || '').toLowerCase();
+            try {
+                // Универсальный парсинг: берем всё, что после знака ? или после tg://proxy?
+                const queryString = trimmed.includes('?') ? trimmed.split('?')[1] : trimmed;
+                const params = new URLSearchParams(queryString);
+                
+                const host = params.get('server');
+                const port = parseInt(params.get('port'));
+                const secret = (params.get('secret') || '').toLowerCase();
 
-            // Проверка порта: только 443
-            const isTargetPort = port === 443;
-            
-            // Проверка секретов: начинаются на dd или ee
-            const isTargetSecret = secret.startsWith('dd') || secret.startsWith('ee');
+                // ЗАЩИТА: проверяем корректность данных
+                if (!host || isNaN(port) || port <= 0 || port >= 65536) return;
 
-            if (host && port > 0 && (isTargetPort || isTargetSecret) && !uniqueHosts.has(host)) {
-                uniqueHosts.add(host);
-                toCheck.push({ host, port, secret });
-            }
+                // ФИЛЬТР: только порт 443 ИЛИ секреты dd/ee
+                const isTargetPort = port === 443;
+                const isTargetSecret = secret.startsWith('dd') || secret.startsWith('ee');
+
+                if ((isTargetPort || isTargetSecret) && !uniqueHosts.has(host)) {
+                    uniqueHosts.add(host);
+                    toCheck.push({ host, port, secret });
+                }
+            } catch (e) { return; }
         });
 
-        // Перемешиваем список, чтобы в выборку попадали разные серверы
+        // Перемешиваем список для разнообразия
         toCheck = toCheck.sort(() => Math.random() - 0.5);
+        console.log(`Уникальных прокси после фильтрации: ${toCheck.length}`);
 
-        console.log(`Уникальных прокси (443 или DD/EE) для проверки: ${toCheck.length}`);
-
+        // Сброс лимита постов
         const today = new Date().getDate();
         if (today !== lastPostDay) {
             postsToday = 0;
@@ -132,8 +130,7 @@ async function updateCache() {
         }
 
         const aliveNow = [];
-        // Проверяем первые 120 штук из перемешанного списка
-        for (const proxy of toCheck.slice(0, 120)) {
+        for (const proxy of toCheck.slice(0, 150)) {
             const ping = await checkSocketDeep(proxy.host, proxy.port);
             if (ping !== null) {
                 aliveNow.push({ ...proxy, ping });
@@ -143,16 +140,15 @@ async function updateCache() {
         aliveNow.sort((a, b) => a.ping - b.ping);
         cachedProxies = aliveNow;
 
-        if (postsToday < DAILY_LIMIT) {
-            const countToPublish = isFirstRun ? 1 : 2; 
+        // Публикация в ТГ
+        if (postsToday < DAILY_LIMIT && aliveNow.length > 0) {
+            const countToPublish = isFirstRun ? 1 : 2;
             const toPublish = aliveNow.slice(0, countToPublish);
             
-            if (toPublish.length > 0) {
-                for (const proxy of toPublish) {
-                    if (postsToday >= DAILY_LIMIT) break;
-                    await sendToTelegram(proxy);
-                    await new Promise(r => setTimeout(r, 120000)); 
-                }
+            for (const proxy of toPublish) {
+                if (postsToday >= DAILY_LIMIT) break;
+                await sendToTelegram(proxy);
+                await new Promise(r => setTimeout(r, 120000));
             }
             isFirstRun = false;
         }
@@ -167,7 +163,6 @@ async function updateCache() {
 
 // API Эндпоинты
 app.get("/ping", async (req, res) => {
-    // Если кэш пуст или данные устарели — ждем обновление
     if (cachedProxies.length === 0 || (Date.now() - lastUpdate > 20 * 60 * 1000)) {
         await updateCache();
     }
