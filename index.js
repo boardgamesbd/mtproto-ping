@@ -96,18 +96,14 @@ async function updateCache() {
             if (!trimmed || !trimmed.includes('server=') || !trimmed.includes('port=')) return;
             
             try {
-                // Универсальный парсинг: берем всё, что после знака ? или после tg://proxy?
                 const queryString = trimmed.includes('?') ? trimmed.split('?')[1] : trimmed;
                 const params = new URLSearchParams(queryString);
-                
                 const host = params.get('server');
                 const port = parseInt(params.get('port'));
                 const secret = (params.get('secret') || '').toLowerCase();
 
-                // ЗАЩИТА: проверяем корректность данных
                 if (!host || isNaN(port) || port <= 0 || port >= 65536) return;
 
-                // ФИЛЬТР: только порт 443 ИЛИ секреты dd/ee
                 const isTargetPort = port === 443;
                 const isTargetSecret = secret.startsWith('dd') || secret.startsWith('ee');
 
@@ -118,11 +114,9 @@ async function updateCache() {
             } catch (e) { return; }
         });
 
-        // Перемешиваем список для разнообразия
         toCheck = toCheck.sort(() => Math.random() - 0.5);
         console.log(`Уникальных прокси после фильтрации: ${toCheck.length}`);
 
-        // Сброс лимита постов
         const today = new Date().getDate();
         if (today !== lastPostDay) {
             postsToday = 0;
@@ -130,15 +124,25 @@ async function updateCache() {
         }
 
         const aliveNow = [];
+        // Проверяем порцию из 150 штук
         for (const proxy of toCheck.slice(0, 150)) {
             const ping = await checkSocketDeep(proxy.host, proxy.port);
             if (ping !== null) {
                 aliveNow.push({ ...proxy, ping });
+                
+                // ПРАВКА: Если кэш пуст, записываем первые 10 рабочих сразу, 
+                // чтобы приложение мгновенно ожило для пользователя
+                if (cachedProxies.length === 0 && aliveNow.length === 10) {
+                    cachedProxies = [...aliveNow];
+                    console.log("Первичный кэш наполнен (10 шт), продолжаем проверку...");
+                }
             }
         }
 
+        // Финальная сортировка по пингу
         aliveNow.sort((a, b) => a.ping - b.ping);
         cachedProxies = aliveNow;
+        console.log(`Проверка завершена. Всего живых: ${aliveNow.length}`);
 
         // Публикация в ТГ
         if (postsToday < DAILY_LIMIT && aliveNow.length > 0) {
@@ -163,8 +167,12 @@ async function updateCache() {
 
 // API Эндпоинты
 app.get("/ping", async (req, res) => {
-    if (cachedProxies.length === 0 || (Date.now() - lastUpdate > 20 * 60 * 1000)) {
+    // Если данных совсем нет — ждем первую порцию
+    if (cachedProxies.length === 0) {
         await updateCache();
+    } else if (Date.now() - lastUpdate > 20 * 60 * 1000) {
+        // Если данные просто устарели — обновляем в фоне, отдавая старые
+        updateCache();
     }
     res.json(cachedProxies);
 });
