@@ -25,22 +25,36 @@ let lastPostDay = new Date().getDate();
 let isFirstRun = true;
 
 /**
- * Глубокая проверка сокета с увеличенным таймаутом
+ * Проверка сокета
  */
-function checkSocketDeep(host, port) {
+function checkSocket(proxy) {
     return new Promise((resolve) => {
         const socket = new net.Socket();
         const start = Date.now();
-        socket.setTimeout(7000); // Увеличили до 7 сек для более стабильной проверки
+        socket.setTimeout(7000); 
 
-        socket.connect(port, host, () => {
+        socket.connect(proxy.port, proxy.host, () => {
             const ping = Date.now() - start;
             socket.destroy();
-            resolve(ping);
+            resolve({ ...proxy, ping });
         });
 
         socket.on("error", () => { socket.destroy(); resolve(null); });
         socket.on("timeout", () => { socket.destroy(); resolve(null); });
+    });
+}
+
+/**
+ * Логика сортировки: EE в приоритете, далее по пингу
+ */
+function prioritizeAndSort(proxies) {
+    return proxies.sort((a, b) => {
+        const aIsEE = a.secret.toLowerCase().startsWith('ee');
+        const bIsEE = b.secret.toLowerCase().startsWith('ee');
+        
+        if (aIsEE && !bIsEE) return -1;
+        if (!aIsEE && bIsEE) return 1;
+        return a.ping - b.ping; // Если оба EE или оба не EE — по пингу
     });
 }
 
@@ -70,15 +84,13 @@ async function updateCache() {
     isUpdating = true;
 
     try {
-        console.log("Сбор данных из новых репозиториев...");
+        console.log("Сбор всех доступных прокси без фильтров...");
         const allLines = [];
         for (const url of SOURCES) {
             try {
-                const res = await axios.get(url, { timeout: 12000 });
+                const res = await axios.get(url, { timeout: 15000 });
                 allLines.push(...res.data.split("\n"));
-            } catch (e) {
-                console.error(`Источник недоступен: ${url}`);
-            }
+            } catch (e) { console.error(`Ошибка источника: ${url}`); }
         }
 
         const uniqueHosts = new Set();
@@ -93,66 +105,60 @@ async function updateCache() {
                 const params = new URLSearchParams(queryString);
                 const host = params.get('server');
                 const port = parseInt(params.get('port'));
-                const secret = (params.get('secret') || '').toLowerCase();
+                const secret = params.get('secret');
 
-                if (!host || isNaN(port) || port <= 0 || port >= 65536) return;
-
-                // СМЯГЧЕННЫЙ ФИЛЬТР: 
-                // 1. Либо порт 443 (стандарт)
-                // 2. Либо секрет начинается на ee/dd
-                // 3. Либо просто стандартный секрет (32 символа), если список совсем пуст
-                const isTargetPort = port === 443;
-                const isTargetSecret = secret.startsWith('dd') || secret.startsWith('ee') || secret.length === 32;
-
-                if ((isTargetPort || isTargetSecret) && !uniqueHosts.has(host)) {
+                if (host && port > 0 && port < 65536 && secret && !uniqueHosts.has(host)) {
                     uniqueHosts.add(host);
                     toCheck.push({ host, port, secret });
                 }
-            } catch (e) { return; }
+            } catch (e) {}
         });
 
-        toCheck = toCheck.sort(() => Math.random() - 0.5);
-        console.log(`Найдено потенциальных серверов: ${toCheck.length}`);
+        toCheck = toCheck.sort(() => Math.random() - 0.5).slice(0, 300);
+        console.log(`Кандидатов: ${toCheck.length}. Начинаю проверку...`);
 
+        const aliveNow = [];
+        const batchSize = 25; // Параллельная проверка пачками
+
+        for (let i = 0; i < toCheck.length; i += batchSize) {
+            const batch = toCheck.slice(i, i + batchSize);
+            const results = await Promise.all(batch.map(p => checkSocket(p)));
+            const successful = results.filter(r => r !== null);
+            
+            aliveNow.push(...successful);
+            
+            // Быстрое наполнение кэша для пользователя
+            if (cachedProxies.length === 0 && aliveNow.length >= 10) {
+                cachedProxies = prioritizeAndSort([...aliveNow]);
+            }
+        }
+
+        cachedProxies = prioritizeAndSort(aliveNow);
+        console.log(`Обновление завершено. Живых: ${aliveNow.length}`);
+
+        // Сброс счетчика постов
         const today = new Date().getDate();
         if (today !== lastPostDay) {
             postsToday = 0;
             lastPostDay = today;
         }
 
-        const aliveNow = [];
-        // Проверяем 150 серверов
-        for (const proxy of toCheck.slice(0, 150)) {
-            const ping = await checkSocketDeep(proxy.host, proxy.port);
-            if (ping !== null) {
-                aliveNow.push({ ...proxy, ping });
-                
-                // Чтобы приложение не висело, отдаем первые 5 штук сразу
-                if (cachedProxies.length === 0 && aliveNow.length === 5) {
-                    cachedProxies = [...aliveNow];
-                }
-            }
-        }
-
-        aliveNow.sort((a, b) => a.ping - b.ping);
-        cachedProxies = aliveNow;
-        console.log(`Обновление завершено. Живых серверов: ${aliveNow.length}`);
-
+        // Публикация
         if (postsToday < DAILY_LIMIT && aliveNow.length > 0) {
             const countToPublish = isFirstRun ? 1 : 2;
-            const toPublish = aliveNow.slice(0, countToPublish);
+            const toPublish = cachedProxies.slice(0, countToPublish);
             
             for (const proxy of toPublish) {
                 if (postsToday >= DAILY_LIMIT) break;
                 await sendToTelegram(proxy);
-                await new Promise(r => setTimeout(r, 60000)); // Уменьшил паузу до 1 мин
+                await new Promise(r => setTimeout(r, 60000));
             }
             isFirstRun = false;
         }
 
         lastUpdate = Date.now();
     } catch (err) {
-        console.error("Ошибка в updateCache:", err.message);
+        console.error("Ошибка обновления:", err.message);
     } finally {
         isUpdating = false;
     }
@@ -161,17 +167,17 @@ async function updateCache() {
 app.get("/ping", async (req, res) => {
     if (cachedProxies.length === 0) {
         await updateCache();
-    } else if (Date.now() - lastUpdate > 15 * 60 * 1000) { // Обновляем чаще (раз в 15 мин)
+    } else if (Date.now() - lastUpdate > 15 * 60 * 1000) {
         updateCache();
     }
     res.json(cachedProxies);
 });
 
 app.get("/", (req, res) => {
-    res.send(`MTProto Monitor Active. Servers: ${cachedProxies.length}. Today: ${postsToday}/${DAILY_LIMIT}`);
+    res.send(`Active. Live: ${cachedProxies.length}. Posts: ${postsToday}/${DAILY_LIMIT}`);
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`Сервер активен на порту ${PORT}`);
+    console.log(`Сервер запущен на порту ${PORT}`);
 });
