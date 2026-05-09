@@ -8,7 +8,7 @@ app.use(cors());
 app.use(express.json());
 
 // --- НАСТРОЙКИ ---
-const TG_TOKEN = "8254087272:AAFKgYTDBZCvkyuZ34fbZqc6Y43qjzEqkSE";
+const TG_TOKEN = "нахуй пошел мразь воняющая кислыми половыми тряпками";
 const TG_CHAT_ID = "@Proxy_free_Daily";
 const SOURCES = [
     "https://raw.githubusercontent.com/SoliSpirit/mtproto/refs/heads/master/all_proxies.txt",
